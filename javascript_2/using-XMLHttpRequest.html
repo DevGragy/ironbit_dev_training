@@ -1,0 +1,310 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>Envío de formularios con AJAX puro &ndash; MDN</title>
+    <script type="text/javascript">
+        "use strict";
+
+        /*\
+        |*|
+        |*|  :: XMLHttpRequest.prototype.sendAsBinary() Polyfill ::
+        |*|
+        |*|  https://developer.mozilla.org/es/docs/DOM/XMLHttpRequest#sendAsBinary()
+        \*/
+
+        if (!XMLHttpRequest.prototype.sendAsBinary) {
+            XMLHttpRequest.prototype.sendAsBinary = function (sData) {
+                var nBytes = sData.length,
+                    ui8Data = new Uint8Array(nBytes);
+                for (var nIdx = 0; nIdx < nBytes; nIdx++) {
+                    ui8Data[nIdx] = sData.charCodeAt(nIdx) & 0xff;
+                }
+                /* enviar como ArrayBufferView...: */
+                this.send(ui8Data);
+                /* ...o como ArrayBuffer (legacy)...: this.send(ui8Data.buffer); */
+            };
+        }
+
+        /*\
+        |*|
+        |*|  :: AJAX Framework de envío de formulario ::
+        |*|
+        |*|  https://developer.mozilla.org/es/docs/DOM/XMLHttpRequest/Using_XMLHttpRequest
+        |*|
+        |*|  Este framework está publicado bajo la licencia pública GNU, versión 3 o posterior.
+        |*|  https://www.gnu.org/licenses/gpl-3.0-standalone.html
+        |*|
+        |*|  Sintaxis:
+        |*|
+        |*|   AJAXSubmit(HTMLFormElement);
+        \*/
+
+        var AJAXSubmit = (function () {
+            function ajaxSuccess() {
+                /* console.log("AJAXSubmit - ¡Éxito!"); */
+                console.log(this.responseText);
+                /* puedes obtener los datos serializados a través de la propiedad personalizada "submittedData": */
+                /* console.log(JSON.stringify(this.submittedData)); */
+            }
+
+            function submitData(oData) {
+                /* la petición AJAX... */
+                var oAjaxReq = new XMLHttpRequest();
+                oAjaxReq.submittedData = oData;
+                oAjaxReq.onload = ajaxSuccess;
+                if (oData.technique === 0) {
+                    /* el método es GET */
+                    oAjaxReq.open(
+                        "get",
+                        oData.receiver.replace(
+                            /(?:\?.*)?$/,
+                            oData.segments.length > 0 ? "?" + oData.segments.join("&") : "",
+                        ),
+                        true,
+                    );
+                    oAjaxReq.send(null);
+                } else {
+                    /* el método es POST */
+                    oAjaxReq.open("post", oData.receiver, true);
+                    if (oData.technique === 3) {
+                        /* enctype es multipart/form-data */
+                        var sBoundary =
+                            "---------------------------" + Date.now().toString(16);
+                        oAjaxReq.setRequestHeader(
+                            "Content-Type",
+                            "multipart\/form-data; boundary=" + sBoundary,
+                        );
+                        oAjaxReq.sendAsBinary(
+                            "--" +
+                            sBoundary +
+                            "\r\n" +
+                            oData.segments.join("--" + sBoundary + "\r\n") +
+                            "--" +
+                            sBoundary +
+                            "--\r\n",
+                        );
+                    } else {
+                        /* enctype es application/x-www-form-urlencoded or text/plain */
+                        oAjaxReq.setRequestHeader("Content-Type", oData.contentType);
+                        oAjaxReq.send(
+                            oData.segments.join(oData.technique === 2 ? "\r\n" : "&"),
+                        );
+                    }
+                }
+            }
+
+            function processStatus(oData) {
+                if (oData.status > 0) {
+                    return;
+                }
+                /* ¡el formulario está ahora totalmente serializado! haz algo antes de enviarlo al servidor... */
+                /* doSomething(oData); */
+                /* console.log("AJAXSubmit - El formulario está ahora serializado. Enviando..."); */
+                submitData(oData);
+            }
+
+            function pushSegment(oFREvt) {
+                this.owner.segments[this.segmentIdx] += oFREvt.target.result + "\r\n";
+                this.owner.status--;
+                processStatus(this.owner);
+            }
+
+            function plainEscape(sText) {
+                return sText.replace(/[\s\=\\]/g, "\\$&");
+            }
+
+            function SubmitRequest(oTarget) {
+                var nFile,
+                    sFieldType,
+                    oField,
+                    oSegmReq,
+                    oFile,
+                    bIsPost = oTarget.method.toLowerCase() === "post";
+                /* console.log("AJAXSubmit - Serializando formulario..."); */
+                this.contentType =
+                    bIsPost && oTarget.enctype
+                        ? oTarget.enctype
+                        : "application\/x-www-form-urlencoded";
+                this.technique = bIsPost
+                    ? this.contentType === "multipart\/form-data"
+                        ? 3
+                        : this.contentType === "text\/plain"
+                            ? 2
+                            : 1
+                    : 0;
+                this.receiver = oTarget.action;
+                this.status = 0;
+                this.segments = [];
+                var fFilter = this.technique === 2 ? plainEscape : escape;
+                for (var nItem = 0; nItem < oTarget.elements.length; nItem++) {
+                    oField = oTarget.elements[nItem];
+                    if (!oField.hasAttribute("name")) {
+                        continue;
+                    }
+                    sFieldType =
+                        oField.nodeName.toUpperCase() === "INPUT" &&
+                            oField.hasAttribute("type")
+                            ? oField.getAttribute("type").toUpperCase()
+                            : "TEXT";
+                    if (sFieldType === "FILE" && oField.files.length > 0) {
+                        if (this.technique === 3) {
+                            /* enctype es multipart/form-data */
+                            for (nFile = 0; nFile < oField.files.length; nFile++) {
+                                oFile = oField.files[nFile];
+                                oSegmReq = new FileReader();
+                                /* (propiedades personalizadas:) */
+                                oSegmReq.segmentIdx = this.segments.length;
+                                oSegmReq.owner = this;
+                                /* (fin de las propiedades personalizadas) */
+                                oSegmReq.onload = pushSegment;
+                                this.segments.push(
+                                    'Content-Disposition: form-data; name="' +
+                                    oField.name +
+                                    '"; filename="' +
+                                    oFile.name +
+                                    '"\r\nContent-Type: ' +
+                                    oFile.type +
+                                    "\r\n\r\n",
+                                );
+                                this.status++;
+                                oSegmReq.readAsBinaryString(oFile);
+                            }
+                        } else {
+                            /* enctype es application/x-www-form-urlencoded or text/plain or
+                         el método es GET: ¡los archivos no se enviarán! */
+                            for (
+                                nFile = 0;
+                                nFile < oField.files.length;
+                                this.segments.push(
+                                    fFilter(oField.name) +
+                                    "=" +
+                                    fFilter(oField.files[nFile++].name),
+                                )
+                            );
+                        }
+                    } else if (
+                        (sFieldType !== "RADIO" && sFieldType !== "CHECKBOX") ||
+                        oField.checked
+                    ) {
+                        /* NOTA: esto enviará _todos_ los botones de envío. Detectar el correcto no es trivial. */
+                        /* el tipo de campo no es FILE o es FILE pero está vacío */
+                        this.segments.push(
+                            this.technique === 3 /* enctype es multipart/form-data */
+                                ? 'Content-Disposition: form-data; name="' +
+                                oField.name +
+                                '"\r\n\r\n' +
+                                oField.value +
+                                "\r\n"
+                                : /* enctype es application/x-www-form-urlencoded o text/plain el método es GET */
+                                fFilter(oField.name) + "=" + fFilter(oField.value),
+                        );
+                    }
+                }
+                processStatus(this);
+            }
+
+            return function (oFormElement) {
+                if (!oFormElement.action) {
+                    return;
+                }
+                new SubmitRequest(oFormElement);
+            };
+        })();
+    </script>
+</head>
+
+<body>
+    <h1>Envío de formularios con AJAX puro</h1>
+
+    <h2>Utilizando el método GET</h2>
+
+    <form action="register.php" method="get" onsubmit="AJAXSubmit(this); return false;">
+        <fieldset>
+            <legend>Ejemplo de registro</legend>
+            <p>
+                Nombre: <input type="text" name="firstname" /><br />
+                Apellido: <input type="text" name="lastname" />
+            </p>
+            <p>
+                <input type="submit" value="Submit" />
+            </p>
+        </fieldset>
+    </form>
+
+    <h2>Utilizando el método POST</h2>
+    <h3>Enctype: application/x-www-form-urlencoded (por defecto)</h3>
+
+    <form action="register.php" method="post" onsubmit="AJAXSubmit(this); return false;">
+        <fieldset>
+            <legend>Ejemplo de registro</legend>
+            <p>
+                Nombre: <input type="text" name="firstname" /><br />
+                Apellido: <input type="text" name="lastname" />
+            </p>
+            <p>
+                <input type="submit" value="Submit" />
+            </p>
+        </fieldset>
+    </form>
+
+    <h3>Enctype: text/plain</h3>
+
+    <form action="register.php" method="post" enctype="text/plain" onsubmit="AJAXSubmit(this); return false;">
+        <fieldset>
+            <legend>Ejemplo de registro</legend>
+            <p>Tu nombre: <input type="text" name="user" /></p>
+            <p>
+                Tu mensaje:<br />
+                <textarea name="message" cols="40" rows="8"></textarea>
+            </p>
+            <p>
+                <input type="submit" value="Submit" />
+            </p>
+        </fieldset>
+    </form>
+
+    <h3>Enctype: multipart/form-data</h3>
+
+    <form action="register.php" method="post" enctype="multipart/form-data" onsubmit="AJAXSubmit(this); return false;">
+        <fieldset>
+            <legend>Ejemplo de subida</legend>
+            <p>
+                Nombre: <input type="text" name="firstname" /><br />
+                Apellido: <input type="text" name="lastname" /><br />
+                Sexo:
+                <input id="sex_male" type="radio" name="sex" value="male" />
+                <label for="sex_male">Hombre</label>
+                <input id="sex_female" type="radio" name="sex" value="female" />
+                <label for="sex_female">Mujer</label><br />
+                Contraseña: <input type="password" name="secret" /><br />
+                ¿Qué prefieres?:
+                <select name="image_type">
+                    <option>Libros</option>
+                    <option>Cine</option>
+                    <option>TV</option>
+                </select>
+            </p>
+            <p>
+                Envía tus fotos:
+                <input type="file" multiple name="photos[]" />
+            </p>
+            <p>
+                <input id="vehicle_bike" type="checkbox" name="vehicle[]" value="Bike" />
+                <label for="vehicle_bike">Tengo una bicicleta</label><br />
+                <input id="vehicle_car" type="checkbox" name="vehicle[]" value="Car" />
+                <label for="vehicle_car">Tengo un coche</label>
+            </p>
+            <p>
+                Descríbete:<br />
+                <textarea name="description" cols="50" rows="8"></textarea>
+            </p>
+            <p>
+                <input type="submit" value="Submit" />
+            </p>
+        </fieldset>
+    </form>
+</body>
+
+</html>
